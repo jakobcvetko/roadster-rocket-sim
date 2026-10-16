@@ -1,0 +1,56 @@
+# No registry needed: an initContainer fetches the prebuilt static site (gh-pages branch of the public repo)
+# into an emptyDir, and stock nginx serves it. To use a container image instead, see k8s/deployment-image.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: roadster-rocket
+  namespace: roadster-rocket
+  labels: { app: roadster-rocket }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: roadster-rocket } }
+  template:
+    metadata: { labels: { app: roadster-rocket } }
+    spec:
+      securityContext: { runAsNonRoot: false }
+      initContainers:
+        - name: fetch-site
+          image: alpine/git:2.45.2
+          args: ["clone", "--depth=1", "--branch=gh-pages", "https://github.com/jakobcvetko/roadster-rocket-sim.git", "/site"]
+          volumeMounts: [{ name: site, mountPath: /site }]
+          resources: { requests: { cpu: 10m, memory: 32Mi }, limits: { memory: 128Mi } }
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports: [{ containerPort: 8080, name: http }]
+          volumeMounts:
+            - { name: site, mountPath: /usr/share/nginx/html, readOnly: true }
+            - { name: conf, mountPath: /etc/nginx/conf.d, readOnly: true }
+          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 30 }
+          resources: { requests: { cpu: 10m, memory: 16Mi }, limits: { memory: 64Mi } }
+      volumes:
+        - { name: site, emptyDir: {} }
+        - { name: conf, configMap: { name: roadster-rocket-nginx } }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: roadster-rocket-nginx, namespace: roadster-rocket }
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      root /usr/share/nginx/html;
+      gzip on; gzip_types text/css application/javascript application/json image/svg+xml;
+      location = /healthz { return 200 'ok'; add_header Content-Type text/plain; }
+      location ~ /\.git { deny all; }
+      location /assets/ { expires 30d; add_header Cache-Control "public, immutable"; }
+      location / { try_files $uri $uri/ /index.html; add_header Cache-Control "no-cache"; }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: roadster-rocket, namespace: roadster-rocket }
+spec:
+  selector: { app: roadster-rocket }
+  ports: [{ name: http, port: 80, targetPort: http }]
